@@ -8,6 +8,7 @@ $:.push File.expand_path(File.dirname(__FILE__))
 
 require 'recorder/play'
 require 'recorder/rapport'
+require 'recorder/oppetarkiv'
 
 module SVT #:nodoc:
   # == Summary
@@ -26,8 +27,10 @@ module SVT #:nodoc:
     # Returns an array consisting of:
     # <tt>[base_url, [parts], bitrate, video_title]</tt>
     def self.record(url)
-      if url.match(/svtplay.se/)
+      if url.match(/svtplay\.se/)
         SVT::Recorder::Play.record(url)
+      elsif url.match(/oppetarkiv\.se/)
+        SVT::Recorder::OppetArkiv.record(url)
       else
         SVT::Recorder::Rapport.record(url)
       end

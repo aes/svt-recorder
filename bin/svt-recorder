@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 # -*- coding: utf-8 -*-
+$:.unshift File.join(File.dirname(File.expand_path(__FILE__)), '..', 'lib')
 
 begin
   require 'svt/recorder'
@@ -9,98 +10,121 @@ rescue LoadError
   require 'svt/recorder'
 end
 
-require 'tempfile'
 require 'readline'
-require 'ostruct'
-require 'progress_bar'
+require 'optparse'
+require 'pp'
 
-if ARGV.empty? or ARGV[0].match(/\A(-h)|((--)?help)\Z/i)
-  puts "Usage: #{$0.split(/\//)[-1]} <SVT Play URL> [name of output file]"
-  puts "\tAll parts of the video at SVT Play URL will be recorded."
-  puts "\tIf you've supplied an output name that will be used, otherwise you'll be asked."
-  puts ''
-  puts "Library version: #{SVT::Recorder::VERSION}"
-  exit 0
-elsif not ARGV[0].match(/(svtplay|svt\.se|oppetarkiv\.se)/)
-  puts "No valid SVT Play or Play Rapport URL supplied"
-  exit 1
+STDOUT.sync = true
+
+
+options = { :subs => true, :video => true }
+
+opt_parser = OptionParser.new do |opt|
+  opt.banner = "Usage: svt-recorder [OPTIONS]... URL [NAME]"
+  opt.separator  ""
+  opt.separator  "Options"
+
+  opt.on("-h", "--help", "help") do
+    puts opt_parser
+    exit 0
+  end
+
+  opt.on("-p", "--probe", "Only probe for information") do |probe|
+    options[:probe] = probe
+  end
+
+  opt.on("-r", "--resolution XxY", "Preferred resolution") do |res|
+    options[:resolution] = res
+  end
+
+  opt.on("-b", "--bitrate BR", "Preferred bitrate") do |br|
+    options[:bitrate] = br.to_i
+  end
+
+  opt.on("-s", "--skip-subtitles", "Skip subtitles download") do |skipsubs|
+    options[:subs] = false
+  end
+
+  opt.on("-v", "--skip-video", "Skip video download") do |skipvideo|
+    options[:video] = false
+  end
+
+  opt.on("-f", "--force", "Overwrite any existing file(s)") do |force|
+    options[:force] = force
+  end
+
+  opt.on("-q", "--quiet", "Minimize chattiness") do |quiet|
+    options[:quiet] = quiet
+  end
 end
 
-# Wohoo, don't need wget anymore!
-class HTTPDownload
-  def initialize(downloader, output)
-    @base_url = URI.parse(downloader.base_url)
-    @downloader = downloader
-    @headers = {'User-Agent' => 'Mozilla/5.0 (Windows; U; Windows NT 5.2; en-US; rv:1.9.2.10) Gecko/20100914 Firefox/3.6.10'}
-    @file = output
-    @server = Net::HTTP.start(@base_url.host, @base_url.port)
+opt_parser.parse!
 
-    if block_given?
-      begin
-        yield self
-      ensure
-        close()
-      end
+
+def read_name suggestion
+  puts 'To edit the filename press up arrow'
+
+  Readline::HISTORY.push suggestion
+  name = Readline::readline("Filename: [#{suggestion}] ")
+
+  if not name.strip.empty?
+    name.strip
+  else
+    suggestion
+  end
+end
+
+
+def ask_force_if_exists name
+  if File.exists? name
+    STDERR.puts "\nThe file '#{name}' already exists!"
+
+    reply = Readline::readline('Overwrite? Y/n: ')
+
+    if reply.match(/Y/i)
+      return true
+    else
+      puts "Will not overwrite #{name}"
+      exit 1
+    end
+  end
+end
+
+
+def get_filenames options, suggestion, exts
+  output_name = nil
+
+  while output_name == nil do
+    output_name = ARGV[1] ? ARGV[1].strip : read_name(suggestion)
+
+    return output_name if options[:force]
+
+    exts.each do |ext|
+      force = ask_force_if_exists(output_name + ext)
+      options[:force] ||= force
     end
   end
 
-  # Will yield the number of megabytes downloaded every megabyte
-  def fetch_all
-    downloaded = 0
-    megabyte = 1024 * 1024
-    mb_down = 0
-    File.open(@file, 'wb+') do |file|
-      @downloader.parts do |part|
-        begin
-          @server.request_get(part, @headers) do |res|
-            res.read_body do |body|
-              file.write body
-            end
-          end # /@server
-        rescue Timeout::Error, EOFError, Errno::ECONNRESET => exception
-          yield -1
-          @server = Net::HTTP.start(@base_url.host, @base_url.port)
-          STDERR.puts "Connection error..."
-          retry
-        end
+  output_name
+end
 
-        yield part
-      end # /parts
-    end # /File
+
+downloader = SVT::Recorder::Base.new(ARGV[0], options)
+
+if options[:probe]
+  print "Available resolutions (and bandwidths):\n"
+  for k, v in downloader.stream_map.sort_by {|k,v| v['BANDWIDTH'].to_i } do
+    print "  #{v['RESOLUTION']}\t#{v['BANDWIDTH']}\n"
   end
 
-  def close ; @server.finish ; end
-  alias :disconnect :close
+  print "\n" + (downloader.subs ? "Has" : "Doesn't have") + " subtitles.\n"
+
+  exit 0
 end
 
-# Ensure that all output is written to console when it is asked to,
-# no buffer for you!
-STDOUT.sync = true
 
-downloader = SVT::Recorder.record(ARGV[0])
-output_file = if ARGV[1]
-                ARGV[1].strip
-              else
-                puts 'To edit the filename press up arrow'
-                Readline::HISTORY.push downloader.title
-                name = Readline::readline("Filename: [#{downloader.title}] ")
-                if not name.strip.empty?
-                  name.strip
-                else
-                  downloader.title
-                end
-              end + '.mp4'
+exts = [] + (options[:subs] ? ['.srt'] : []) + (options[:subs] ? ['.mp4'] : [])
 
-if File.exists? output_file
-  STDERR.puts "\nThe file '#{output_file}' already exists!"
-  overwrite = Readline::readline('Overwrite? Y/N: ')
+filename = get_filenames options, downloader.title, exts
 
-  exit 1 unless overwrite.match(/Y/i)
-end
-
-progress = ProgressBar.new(downloader.parts?, :bar, :elapsed, :eta, :counter)
-puts "Starting recording..."
-HTTPDownload.new(downloader, output_file) do |down|
-  down.fetch_all {|part| progress.increment! }
-  puts "\nFinished recording: #{output_file}"
-end
+SVT::Recorder::HTTPDownload.new(options, downloader, filename).get()
